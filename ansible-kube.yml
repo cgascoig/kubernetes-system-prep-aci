@@ -1,0 +1,194 @@
+---
+
+- hosts: all
+  vars:
+    - proxy_url: http://10.67.28.134:3128/
+    - no_proxy_list: localhost,127.0.0.1,192.168.32.21
+    - cluster_dns_address: 192.168.34.10
+  tasks:
+    - name: setup yum proxy
+      lineinfile:
+        dest: /etc/yum.conf
+        line: "proxy={{ proxy_url }}"
+      become: true
+
+    - name: disable SELinux
+      selinux:
+        policy: targeted
+        state: permissive
+      become: true
+
+#    - name: install needed network manager libs
+#      yum:
+#        name: '{{ item }}'
+#        state: installed
+#      with_items:
+#        - NetworkManager-glib
+#        - nm-connection-editor.x86_64
+#        - libsemanage-python
+#        - policycoreutils-python
+#      become: true
+
+#    - name: setup fabric physical interface
+#      nmcli:
+#         conn_name: ens192
+#         ifname: ens192
+#         mtu: 1600
+#         state: present
+#         type: ethernet
+#         autoconnect: true
+#      become: true
+#    - name: setup infra VLAN
+#      nmcli:
+#        conn_name: ens192.4090
+#        ifname: ens192.4090
+#        state: present
+#        type: vlan
+#        vlanid: 4090
+#        vlandev: ens192
+#        autoconnect: true
+
+#    - name: setup network interfaces
+#      shell: |
+#        if  ! nmcli con show ens192.4090 > /dev/null ; then 
+#          nmcli con add type vlan ifname ens192.4090 dev ens192 id 4090 con-name ens192.4090
+#        fi
+#      become: true
+
+    - name: setup proxy environment vars
+      lineinfile:
+        dest: ~/.bashrc
+        line: "{{ item }}"
+      with_items:
+        - "export https_proxy={{ proxy_url }}"
+        - "export http_proxy={{ proxy_url }}"
+        - "export no_proxy={{ no_proxy_list }}"
+
+    - name: setup proxy environment vars (for root)
+      lineinfile:
+        dest: ~root/.bashrc
+        line: "{{ item }}"
+      with_items:
+        - "export https_proxy={{ proxy_url }}"
+        - "export http_proxy={{ proxy_url }}"
+        - "export no_proxy={{ no_proxy_list }}"
+      become: true
+
+    - name: disable firewalld
+      systemd:
+        name: firewalld
+        enabled: no
+        state: stopped
+      become: true
+
+    - name: disable swap
+      command: swapoff -a
+      become: true
+
+    - name: disable swap at boot
+      lineinfile:
+        dest: /etc/fstab
+        state: absent
+        regexp: '\sswap\s'
+      become: true
+
+    - name: upgrade all packages
+      yum:
+        name: '*'
+        state: latest
+        exclude: kubeadm*
+      become: true
+
+    - name: install epel repo
+      yum:
+        name: epel-release
+        state: latest
+      become: true
+    - name: install pip
+      yum:
+        name: python-pip
+        state: latest
+      become: true
+
+    - name: install ACI provisioning tool
+      pip:
+        name: acc-provision
+        version: '1.0.2'
+      become: true
+      become_flags: --preserve-env
+
+    - name: copy sample ACI config file
+      copy:
+        src: templates/aci-containers-config.yaml.sample
+        dest: ~/aci-containers-config.yaml.sample
+
+    - name: install docker
+      yum:
+        name: docker
+        state: latest
+      become: true
+
+    - name: setup docker proxy
+      file:
+        path: /etc/systemd/system/docker.service.d
+        owner: root
+        group: root
+        state: directory
+        mode: 0755
+      become: true
+
+    - name: setup docker proxy
+      template: 
+        src: templates/docker-proxy.j2
+        dest: /etc/systemd/system/docker.service.d/http-proxy.conf 
+      become: true
+
+    - name: enable and restart docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
+      become: true
+
+    - name: setup kubernetes repo
+      template:
+        src: templates/kubernetes.repo.j2
+        dest: /etc/yum.repos.d/kubernetes.repo
+      become: true
+
+    - name: install kubernetes
+      yum:
+        name: "{{ item }}"
+        state: present
+        allow_downgrade: yes
+      become: true
+      with_items:
+        - kubelet
+        - kubeadm-1.8.5-0.x86_64
+
+    - name: setup cluster DNS setting in kubelet
+      lineinfile:
+        dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+        line: 'Environment="KUBELET_DNS_ARGS=--cluster-dns={{ cluster_dns_address }} --cluster-domain=cluster.local"'
+        regexp: 'KUBELET_DNS_ARGS='
+      become: true
+
+    - name: enable and restart kubelet
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
+      become: true
+
+    - name: setup sysctl entries
+      sysctl:
+        name: "{{ item }}"
+        value: 1
+      with_items:
+        - net.bridge.bridge-nf-call-ip6tables
+        - net.bridge.bridge-nf-call-iptables
+        - net.ipv4.ip_forward
+      become: true
+
